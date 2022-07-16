@@ -1,5 +1,20 @@
 # TCPREDIR
 
+## 编译方法
+
+### 安装依赖库
+```shell
+apt install libboost-dev
+```
+
+### 开始编译
+```shell
+mkdir build
+cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make
+```
+
 ## 用途
 在用户态实现TCP流量转发，不依赖内核转发参数。
 
