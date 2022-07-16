@@ -99,7 +99,7 @@ public:
         if (_r == tail()) {
             _r = head();
         }
-        // BUG: outside may store writeptr, set change _w will lead to write wrong postition outside
+        // BUG: outside may store writeptr, set _w will lead to write wrong postition outside
         // if (_w == _r) {
         //     _w = _r = head();
         // }
