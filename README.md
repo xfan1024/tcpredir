@@ -4,7 +4,7 @@
 
 ### 安装依赖库
 ```shell
-apt install libboost-dev
+apt install libboost-dev libboost-system-dev
 ```
 
 ### 开始编译

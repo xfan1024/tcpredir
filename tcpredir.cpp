@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <optional>
 #include <memory>
+#include <thread>
 #include <boost/asio.hpp>
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/deadline_timer.hpp>
@@ -284,7 +285,7 @@ void tcpredir_connection::send_cb(const error_code_t &ec, size_t transfered)
 class tcpredir_worker : public std::enable_shared_from_this<tcpredir_worker>
 {
 public:
-    tcpredir_worker(io_context_t &ioc) : _ioc{ioc}, _acceptor{ioc}
+    tcpredir_worker(io_context_t &ioc) : _ioc{ioc}, _acceptor{ioc}, _client_socket_tmp{ioc}
     {}
 
     ~tcpredir_worker()
@@ -318,12 +319,12 @@ private:
     void do_accept()
     {
         using namespace std::placeholders;
-        _acceptor.async_accept(
-            [this, worker = weak_from_this()](const error_code_t &ec, socket_t socket)
+        _acceptor.async_accept(_client_socket_tmp,
+            [this, worker = weak_from_this()](const error_code_t &ec)
             {
                 if (worker.expired())
                     return;
-                accept_cb(ec, std::move(socket));
+                accept_cb(ec, std::move(_client_socket_tmp));
             }
         );
     }
@@ -362,6 +363,7 @@ private:
     io_context_t &_ioc;
     boost::intrusive::list<tcpredir_pair> _connection_pairs; 
     tcp::acceptor _acceptor;
+    socket_t _client_socket_tmp;
 };
 
 static unsigned int calcuate_best_threads()
