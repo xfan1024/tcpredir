@@ -19,9 +19,6 @@ endif()
 
 add_executable(tcpredir tcpredir.cpp)
 target_include_directories(tcpredir PRIVATE ${Boost_INCLUDE_DIR})
-if(Boost_VERSION VERSION_LESS 1.66)
-    target_compile_definitions(tcpredir PRIVATE io_context=io_service)
-endif()
 target_include_directories(tcpredir PRIVATE ${Boost_INCLUDE_DIR})
 target_link_libraries(tcpredir PRIVATE Threads::Threads)
 target_link_libraries(tcpredir PRIVATE Boost::system) # necessary for ubuntu 18.04

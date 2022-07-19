@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: MIT
  */
 #include <iostream>
-#include <iomanip>
 #include <optional>
 #include <memory>
 #include <thread>
+#include <list>
 #include <boost/asio.hpp>
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/deadline_timer.hpp>
@@ -28,7 +28,7 @@ constexpr unsigned int thread_number = 0; // zero means auto calcuate best threa
 
 /* for some convenience */
 namespace asio = boost::asio;
-using io_context_t = asio::io_context;
+using io_service_t = asio::io_service;
 using deadline_timer_t = asio::deadline_timer;
 namespace ip = asio::ip;
 using tcp = ip::tcp;
@@ -44,7 +44,7 @@ class tcpredir_connection
 {
 public:
 
-    tcpredir_connection(io_context_t &ioc, tcpredir_pair &pair, socket_t socket, size_t receive_buffer)
+    tcpredir_connection(io_service_t &ioc, tcpredir_pair &pair, socket_t socket, size_t receive_buffer)
     : _pair{pair}, _socket{std::move(socket)}, _buffer{receive_buffer}, _timer{ioc}
     {
         _sending = false;
@@ -116,7 +116,7 @@ private:
 class tcpredir_pair : public boost::intrusive::list_base_hook<>, public std::enable_shared_from_this<tcpredir_pair>
 {
 public:
-    tcpredir_pair(io_context_t &ioc, socket_t &&client_socket, endpoint_t client_endpoint, endpoint_t server_endpoint)
+    tcpredir_pair(io_service_t &ioc, socket_t &&client_socket, endpoint_t client_endpoint, endpoint_t server_endpoint)
     : _ioc(ioc), _server_socket_tmp(ioc)
     {
         _client.emplace(_ioc, *this, std::move(client_socket), client_buffer_size);
@@ -124,18 +124,9 @@ public:
         _server_endpoint = server_endpoint;
     }
 
-    void reference_self()
-    {
-        _self_reference = shared_from_this();
-    }
-
-    void unreference_self()
-    {
-        _self_reference.reset();
-    }
-
     void start()
     {
+        _self_reference = shared_from_this();
         _server_socket_tmp.async_connect(server_endpoint(), 
             [this, pair = weak_from_this()](const error_code_t &ec)
             {
@@ -147,11 +138,18 @@ public:
         _client->start_receive();
     }
 
+    void close()
+    {
+        _client.reset();
+        _server.reset();
+        _self_reference = nullptr;
+    }
+
     void connected(const error_code_t &ec)
     {
         if (ec)
         {
-            unreference_self();
+            close();
             return;
         }
         _server.emplace(_ioc, *this, std::move(_server_socket_tmp), server_buffer_size);
@@ -171,7 +169,7 @@ public:
 
 private:
     friend class tcpredir_connection;
-    io_context_t& _ioc;
+    io_service_t& _ioc;
     std::shared_ptr<tcpredir_pair> _self_reference;
     socket_t _server_socket_tmp;
     std::optional<tcpredir_connection> _client;
@@ -185,7 +183,7 @@ void tcpredir_connection::close()
     _socket.close();
     if (!_peer || !_peer->have_data_to_send())
     {
-        _pair.unreference_self();
+        _pair.close();
         return;
     }
 }
@@ -210,7 +208,7 @@ void tcpredir_connection::do_send()
         return;
     if (_peer == nullptr || (!_peer->_socket.is_open() && _peer->_buffer.empty()))
     {
-        _pair.unreference_self();
+        _pair.close();
         return;
     }
     if (_peer->_buffer.empty())
@@ -250,7 +248,7 @@ void tcpredir_connection::receive_cb(const error_code_t &ec, size_t transfered)
             close();
         else
         {
-            _pair.unreference_self();
+            _pair.close();
             return;
         }
     }
@@ -270,7 +268,7 @@ void tcpredir_connection::send_cb(const error_code_t &ec, size_t transfered)
     _sending = false;
     if (ec)
     {
-        _pair.unreference_self();
+        _pair.close();
         return;
     }
     reset_timer();
@@ -282,15 +280,15 @@ void tcpredir_connection::send_cb(const error_code_t &ec, size_t transfered)
     do_send();
 }
 
-class tcpredir_worker : public std::enable_shared_from_this<tcpredir_worker>
+class tcpredir_worker
 {
 public:
-    tcpredir_worker(io_context_t &ioc) : _ioc{ioc}, _acceptor{ioc}, _client_socket_tmp{ioc}
+    tcpredir_worker(io_service_t &ioc) : _ioc{ioc}, _acceptor{ioc}, _client_socket_tmp{ioc}
     {}
 
     ~tcpredir_worker()
     {
-        release();
+        stop();
     }
 
     void start(endpoint_t ep)
@@ -304,26 +302,24 @@ public:
         _acceptor.listen(1);
         do_accept();
     }
-private:
-    void release()
+
+    void  stop()
     {
         _acceptor.close();
         _connection_pairs.clear_and_dispose(
             [](tcpredir_pair* pair)
             {
-                pair->unreference_self();
+                pair->close();
             }
         );
     }
 
+private:
     void do_accept()
     {
-        using namespace std::placeholders;
         _acceptor.async_accept(_client_socket_tmp,
-            [this, worker = weak_from_this()](const error_code_t &ec)
+            [this](const error_code_t &ec)
             {
-                if (worker.expired())
-                    return;
                 accept_cb(ec, std::move(_client_socket_tmp));
             }
         );
@@ -333,7 +329,7 @@ private:
     {
         if (ec)
         {
-            release();
+            stop();
             return;
         }
         endpoint_t client_endpoint;
@@ -344,14 +340,16 @@ private:
             std::shared_ptr<tcpredir_pair> pair{new tcpredir_pair{_ioc, std::move(socket), client_endpoint, server_endpoint}, 
                 [this](tcpredir_pair* p)
                 {
-                    auto it = decltype(_connection_pairs)::s_iterator_to(*p);
-                    _connection_pairs.erase(it);
+                    if (p->is_linked())
+                    {
+                        auto it = decltype(_connection_pairs)::s_iterator_to(*p);
+                        _connection_pairs.erase(it);
+                    }
                     delete p;
                     // std::cout << "[DEL] " << std::setw(4) << _connection_pairs.size() << " | "
                     //     << p->client_endpoint() << " <-> " << p->server_endpoint() << std::endl;
                 }
             };
-            pair->reference_self();
             pair->start();
             _connection_pairs.push_back(*pair);
             // std::cout << "[ADD] " << std::setw(4) << _connection_pairs.size() << " | " 
@@ -360,7 +358,7 @@ private:
         do_accept();
     }
 
-    io_context_t &_ioc;
+    io_service_t &_ioc;
     boost::intrusive::list<tcpredir_pair> _connection_pairs; 
     tcp::acceptor _acceptor;
     socket_t _client_socket_tmp;
@@ -374,14 +372,107 @@ static unsigned int calcuate_best_threads()
     return 2 * nproc;
 }
 
-static void worker_thread()
+struct worker_thread : std::thread
 {
-    io_context_t ioc;
-    auto worker_v4 = std::make_shared<tcpredir_worker>(ioc);
-    auto worker_v6 = std::make_shared<tcpredir_worker>(ioc);
+    worker_thread() = default;
+    worker_thread(const worker_thread&) = delete;
+    worker_thread& operator=(const worker_thread&) = delete;
 
-    worker_v4->start(endpoint_t(tcp::v4(), listen_port));
-    worker_v6->start(endpoint_t(tcp::v6(), listen_port));
+    void thread_entry()
+    {
+        worker_v4.start(endpoint_t(tcp::v4(), listen_port));
+        worker_v6.start(endpoint_t(tcp::v6(), listen_port));
+        ioc.run();
+    }
+
+    void start(std::function<void()> done_callback = nullptr)
+    {
+        std::thread &thread = *this;
+        thread = std::thread([this, _done_callback = std::move(done_callback)]()
+            {
+                thread_entry();
+                if (_done_callback)
+                    _done_callback();
+            }
+        );
+    }
+
+    void cancel()
+    {
+        ioc.post([this]()
+            {
+                worker_v4.stop();
+                worker_v6.stop();
+            }
+        );
+    }
+
+    io_service_t ioc;
+    tcpredir_worker worker_v4 {ioc};
+    tcpredir_worker worker_v6 {ioc};
+};
+
+void main_for_multiple_thread(unsigned int n)
+{
+    std::list<worker_thread> threads;
+    io_service_t ioc;
+    std::optional<io_service_t::work> work {ioc};
+    unsigned int downcounter = n;
+
+    for (unsigned int i = 0; i < n; ++i)
+    {
+        threads.emplace_back().start([&ioc, &work, &downcounter]()
+            {
+                ioc.post([&work, &downcounter]()
+                    {
+                        --downcounter;
+                        // std::cout << "thread exited. remaining " << downcounter << " threads" << std::endl;
+                        if (downcounter == 0)
+                        {
+                            work.reset();
+                        }
+                    }
+                );
+            }
+        );
+    }
+
+    asio::signal_set sigint(ioc, SIGINT);
+    sigint.async_wait([&threads](const error_code_t &ec, int)
+        {
+            if (ec)
+                return;
+            std::cout << '\n';
+            // std::cout << "stopping threads: " << threads.size() << std::endl;
+            for (auto &thread : threads)
+                thread.cancel();
+        }
+    );
+    ioc.run();
+
+    for (auto &t : threads)
+        t.join();
+}
+
+void main_for_signal_thread()
+{
+    io_service_t ioc;
+    tcpredir_worker worker_v4 {ioc};
+    tcpredir_worker worker_v6 {ioc};
+
+    worker_v4.start(endpoint_t(tcp::v4(), listen_port));
+    worker_v6.start(endpoint_t(tcp::v6(), listen_port));
+    asio::signal_set sigint(ioc, SIGINT);
+    sigint.async_wait([&worker_v4, &worker_v6](const error_code_t &ec, int)
+        {
+            if (ec)
+                return;
+            std::cout << '\n';
+            // std::cout << "stopping server" << std::endl;
+            worker_v4.stop();
+            worker_v6.stop();
+        }
+    );
     ioc.run();
 }
 
@@ -391,19 +482,8 @@ int main()
     if (!nthread)
         nthread = calcuate_best_threads();
     if (nthread > 1)
-    {
-        std::vector<std::thread> worker_threads;
-        worker_threads.reserve(nthread);
-        for (unsigned int i = 0; i < nthread; ++i)
-        {
-            worker_threads.emplace_back(worker_thread);
-        }
-        for (auto &thread : worker_threads)
-        {
-            thread.join();
-        }
-    }
+        main_for_multiple_thread(nthread);
     else
-        worker_thread();
+        main_for_signal_thread();
     return 0;
 }
