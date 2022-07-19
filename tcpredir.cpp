@@ -24,7 +24,7 @@ constexpr size_t client_buffer_size = 1460;
 constexpr size_t server_buffer_size = 1460;
 constexpr uint16_t listen_port = 1000;
 constexpr unsigned int expired_seconds = 300;
-constexpr unsigned int thread_number = 0; // zero means auto calcuate best thread_number
+constexpr unsigned int thread_number = 0; // zero means auto calculate best thread_number
 
 /* for some convenience */
 namespace asio = boost::asio;
@@ -364,7 +364,7 @@ private:
     socket_t _client_socket_tmp;
 };
 
-static unsigned int calcuate_best_threads()
+static unsigned int calculate_best_threads()
 {
     unsigned int nproc = std::thread::hardware_concurrency();
     if (!nproc)
@@ -428,9 +428,7 @@ void main_for_multiple_thread(unsigned int n)
                         --downcounter;
                         // std::cout << "thread exited. remaining " << downcounter << " threads" << std::endl;
                         if (downcounter == 0)
-                        {
                             work.reset();
-                        }
                     }
                 );
             }
@@ -480,7 +478,7 @@ int main()
 {
     unsigned int nthread = thread_number;
     if (!nthread)
-        nthread = calcuate_best_threads();
+        nthread = calculate_best_threads();
     if (nthread > 1)
         main_for_multiple_thread(nthread);
     else
